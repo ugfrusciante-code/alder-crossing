@@ -40,6 +40,13 @@ export class View {
   private waterTime = { value: 0 };
   private forest!: ReturnType<typeof woodland>;
   private clearedCount = -1;
+  /** Player roads, rebuilt whenever the set of segments changes. */
+  private roadGroup = new T.Group();
+  private roadKey = '';
+  private roadLine: T.Mesh | null = null;
+  /** Live feedback for the road tool, read by the place hint. */
+  roadIssue = '';
+  roadCost = 0;
   constructor(
     readonly canvas: HTMLCanvasElement,
     public game: Game,
@@ -151,7 +158,70 @@ export class View {
     this.clearedCount = -1;
     this.selected = this.selectedFormation = null;
     this.setGhost(null);
+    this.setRoadPreview(null, null);
+    this.roadKey = '';
     this.focus(game.depot);
+  }
+  /** Draw (or clear) the proposed stretch between the road start and the pointer. */
+  setRoadPreview(a: Point | null, b: Point | null) {
+    if (this.roadLine) {
+      this.scene.remove(this.roadLine);
+      this.roadLine.geometry.dispose();
+      (this.roadLine.material as T.Material).dispose();
+      this.roadLine = null;
+    }
+    this.roadIssue = '';
+    this.roadCost = 0;
+    if (!a || !b) return;
+    this.roadIssue = this.game.validateRoad(a, b);
+    this.roadCost = Math.max(1, Math.ceil(dist(a, b) / 5));
+    if (!this.roadIssue && this.game.stock('stone') < this.roadCost)
+      this.roadIssue = `This stretch needs ${this.roadCost} stone.`;
+    // A flat ribbon the width of a road, draped over the ground in short
+    // pieces so it follows the terrain. A one-pixel line was invisible.
+    const len = Math.max(0.01, dist(a, b)),
+      steps = Math.max(1, Math.ceil(len / 1.5)),
+      dx = (b.x - a.x) / len,
+      dz = (b.z - a.z) / len;
+    const geo = new T.BufferGeometry(),
+      v: number[] = [],
+      idx: number[] = [];
+    for (let i = 0; i <= steps; i++) {
+      const x = a.x + (b.x - a.x) * (i / steps),
+        z = a.z + (b.z - a.z) * (i / steps);
+      for (const side of [-0.9, 0.9]) {
+        const px = x - dz * side,
+          pz = z + dx * side;
+        v.push(px, ground(px, pz) + 0.18, pz);
+      }
+      if (i < steps) idx.push(i * 2, i * 2 + 1, i * 2 + 2, i * 2 + 1, i * 2 + 3, i * 2 + 2);
+    }
+    geo.setAttribute('position', new T.Float32BufferAttribute(v, 3));
+    geo.setIndex(idx);
+    this.roadLine = new T.Mesh(
+      geo,
+      new T.MeshBasicMaterial({
+        color: this.roadIssue ? 0xc0533a : 0xf2e2b6,
+        transparent: true,
+        opacity: 0.7,
+        depthTest: false,
+        side: T.DoubleSide,
+      }),
+    );
+    this.roadLine.renderOrder = 10;
+    this.scene.add(this.roadLine);
+  }
+  private syncRoads() {
+    const key = this.game.s.roads.map((r) => `${r.a.x},${r.a.z},${r.b.x},${r.b.z}`).join('|');
+    if (key === this.roadKey) return;
+    this.roadKey = key;
+    for (const c of [...this.roadGroup.children]) {
+      this.roadGroup.remove(c);
+      c.traverse((o) => {
+        if (o instanceof T.Mesh) o.geometry.dispose();
+      });
+    }
+    for (const r of this.game.s.roads) this.roadGroup.add(countryRoad([r.a, r.b], 1.6));
   }
   syncCamera() {
     this.camera.position.set(
@@ -596,6 +666,8 @@ export class View {
 
   update(dt: number, real: number) {
     const g = this.game;
+    if (!this.roadGroup.parent) this.scene.add(this.roadGroup);
+    this.syncRoads();
     this.waterTime.value = real;
     if (this.clearedCount !== g.s.buildings.length) {
       this.forest.clearPlots(

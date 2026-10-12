@@ -208,6 +208,7 @@ canvas.addEventListener('pointerdown', (e) => {
 canvas.addEventListener('pointermove', (e) => {
   const p = view.hit(e.clientX, e.clientY);
   if (p && ui.buildKind) view.moveGhost(p);
+  if (p && ui.roadMode) ui.roadHover(p);
   if (
     down &&
     (down.button === 1 || (down.button === 0 && !ui.buildKind) || (down.button === 2 && !ui.formation))
@@ -229,6 +230,10 @@ canvas.addEventListener('pointerup', (e) => {
   const p = view.hit(e.clientX, e.clientY);
   if (!p) return;
   if (button === 2) {
+    if (ui.roadMode === 'lay') {
+      ui.roadRestart();
+      return;
+    }
     if (ui.formation) command({ type: 'move', id: ui.formation, ...p });
     else ui.cancel();
     return;
@@ -236,6 +241,10 @@ canvas.addEventListener('pointerup', (e) => {
   if (button !== 0) return;
   if (ui.buildKind) {
     command({ type: 'build', kind: ui.buildKind, ...p, rotation: view.placementRotation });
+    return;
+  }
+  if (ui.roadMode) {
+    ui.roadClick(p);
     return;
   }
   const picked = view.pick(e.clientX, e.clientY);

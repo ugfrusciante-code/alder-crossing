@@ -8,6 +8,7 @@ import {
   EDIBLE,
   PRICES,
   GOODS,
+  LABELS,
   type Stock,
   type Good,
   type Kind,
@@ -753,7 +754,7 @@ export class Game {
     this.assign();
     const back = Object.entries(refund)
       .filter(([, q]) => q)
-      .map(([g, q]) => `${q} ${g}`)
+      .map(([g, q]) => `${q} ${LABELS[g as Good].toLowerCase()}`)
       .join(', ');
     this.log(`${BUILDINGS[b.kind].name} demolished.${back ? ` Salvaged ${back}.` : ''}`);
     return ok(`Demolished.${back ? ` Salvaged ${back}.` : ''}`);

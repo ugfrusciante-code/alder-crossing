@@ -361,6 +361,26 @@ export function buildingModel(kind: Kind, m: Mats, seed = 1) {
     k.box(0, -0.05, 0, 12, 0.1, 10, 'soil');
     for (let z = -4.5; z < 5; z += 0.65) k.box(0, 0.06, z, 11.5, 0.13, 0.18, 'soil');
     for (const x of [-6, 6]) for (let z = -5; z <= 5; z += 2) k.cylinder(x, 0.5, z, 0.055, 1, 'wood');
+  } else if (kind === 'mine') {
+    // A timbered adit into the hillside, a spoil heap and an ore cart.
+    k.box(0, 1.2, -1.2, 4.6, 2.4, 2.2, 'stone');
+    for (const x of [-1, 1]) k.box(x, 1.1, 0.05, 0.28, 2.2, 0.28, 'timber');
+    k.box(0, 2.25, 0.05, 2.6, 0.3, 0.32, 'timber');
+    k.box(0, 0.95, -0.05, 1.7, 1.9, 0.1, 'dark');
+    k.push(new T.ConeGeometry(1.4, 1.2, 7), 'stone', 2.6, 0.6, 1.4);
+    k.box(-2.2, 0.55, 1.6, 1.2, 0.6, 0.8, 'wood');
+    for (const x of [-2.6, -1.8]) k.cylinder(x, 0.22, 1.6, 0.22, 0.12, 'iron', Math.PI / 2);
+    for (let i = 0; i < 6; i++) k.box(0, 0.05, 0.6 + i * 0.5, 1.1, 0.06, 0.12, 'wood');
+  } else if (kind === 'smelter') {
+    // A squat stone bloomery with its chimney stack and a fuel pile.
+    k.box(0, 0.2, 0, 4.4, 0.4, 4, 'stone');
+    k.cylinder(0, 1.5, -0.4, 1.1, 2.6, 'stone');
+    k.cylinder(0, 3.4, -0.4, 0.45, 1.6, 'stone');
+    k.box(0, 0.9, 0.7, 0.7, 0.6, 0.1, 'dark');
+    for (const x of [-1.8, 1.8]) for (const z of [-1.6, 1.6]) k.box(x, 1.4, z, 0.2, 2.8, 0.2, 'timber');
+    k.roof(4.3, 3.9, 2.8, 0.9);
+    for (let i = 0; i < 6; i++)
+      k.cylinder(1.9, 0.25 + Math.floor(i / 3) * 0.35, -1 + (i % 3) * 0.4, 0.16, 1.2, 'wood', Math.PI / 2);
   } else if (kind === 'bakery') {
     house(k, 4.8, 3.8, 2.5, 1);
     k.push(new T.SphereGeometry(1.1, 10, 7), 'stone', 3, 1, 0);

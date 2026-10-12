@@ -11,6 +11,7 @@ import {
   type Stock,
 } from '../sim/content';
 import { View } from '../render/view';
+import { dist, type Point } from '../sim/terrain';
 
 export const icon = (name: string, size = 20) => {
   const shapes: Record<string, string> = {
@@ -30,6 +31,7 @@ export const icon = (name: string, size = 20) => {
     chevron: '<path d="m8 4 8 8-8 8"/>',
     close: '<path d="m5 5 14 14M5 19 19 5"/>',
     menu: '<path d="M4 6h16M4 12h16M4 18h16"/>',
+    road: '<path d="M8 2 4 22M16 2l4 20M12 3v3m0 4v3m0 4v3"/>',
   };
   return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${shapes[name] ?? shapes.hammer}</svg>`;
 };
@@ -69,6 +71,11 @@ export class UI {
   panel: Panel = null;
   modal: string | null = null;
   buildKind: Kind | null = null;
+  /** Road tool: 'lay' draws stretches click to click, 'lift' removes them. */
+  roadMode: 'lay' | 'lift' | null = null;
+  roadStart: Point | null = null;
+  /** Building whose demolish button has been pressed once and awaits confirmation. */
+  private demolishArmed: number | null = null;
   selected: number | null = null;
   formation: number | null = null;
   category = 'All';
@@ -141,7 +148,38 @@ export class UI {
     this.panel = null;
     this.buildKind = null;
     this.view.setGhost(null);
+    this.roadMode = null;
+    this.roadStart = null;
+    this.view.setRoadPreview(null, null);
+    this.demolishArmed = null;
     this.render();
+  }
+  /** A click on the ground while the road tool is active. */
+  roadClick(p: Point) {
+    if (this.roadMode === 'lift') {
+      this.hooks.command({ type: 'clearRoad', x: p.x, z: p.z });
+      return;
+    }
+    if (!this.roadStart) {
+      this.roadStart = { ...p };
+      this.render();
+      return;
+    }
+    const before = this.game.s.roads.length;
+    this.hooks.command({ type: 'road', a: this.roadStart, b: p });
+    // Chain: a laid stretch's end is where the next one starts.
+    if (this.game.s.roads.length > before) this.roadStart = { ...p };
+    this.view.setRoadPreview(this.roadStart, p);
+    this.render();
+  }
+  /** Right-click while laying: drop the current start and pick a new one. */
+  roadRestart() {
+    this.roadStart = null;
+    this.view.setRoadPreview(null, null);
+    this.render();
+  }
+  roadHover(p: Point) {
+    if (this.roadMode === 'lay') this.view.setRoadPreview(this.roadStart, p);
   }
   cancel() {
     if (this.modal) {
@@ -151,6 +189,10 @@ export class UI {
     }
     this.buildKind = null;
     this.view.setGhost(null);
+    this.roadMode = null;
+    this.roadStart = null;
+    this.view.setRoadPreview(null, null);
+    this.demolishArmed = null;
     this.panel = null;
     this.selected = null;
     this.formation = null;
@@ -198,6 +240,26 @@ export class UI {
     }
     if (action === 'cancel-placement') {
       this.cancel();
+      return;
+    }
+    if (action === 'road-mode') {
+      const mode = data.mode as 'lay' | 'lift';
+      const off = this.roadMode === mode;
+      this.cancel();
+      this.roadMode = off ? null : mode;
+      this.render();
+      return;
+    }
+    if (action === 'demolish') {
+      const id = Number(data.id);
+      if (this.demolishArmed === id) {
+        this.demolishArmed = null;
+        this.hooks.command({ type: 'demolish', id });
+        this.cancel();
+      } else {
+        this.demolishArmed = id;
+        this.render();
+      }
       return;
     }
     if (action === 'cancel-build') {
@@ -265,6 +327,8 @@ export class UI {
     if (action === 'demobilize') this.hooks.command({ type: 'demobilize', id: Number(data.id) });
     if (action === 'scout') this.hooks.command({ type: 'scout' });
     if (action === 'claim') this.hooks.command({ type: 'claim' });
+    if (action === 'scout-ridge') this.hooks.command({ type: 'scoutRidge' });
+    if (action === 'claim-ridge') this.hooks.command({ type: 'claimRidge' });
     if (action === 'immigrate') this.hooks.command({ type: 'immigrate' });
     if (action === 'trade') {
       const good = this.root.querySelector<HTMLSelectElement>('#trade-good')!.value as Good;
@@ -353,7 +417,7 @@ export class UI {
           'Deployed workers leave civilian jobs and consume provisions.',
         ),
     );
-    const objectives = [
+    const chapter1 = [
       {
         name: 'Establish the bread chain',
         done: ['mill', 'bakery'].every((kind) =>
@@ -377,9 +441,30 @@ export class UI {
         detail: `Staff and supply an outpost · ${g.s.holdDays}/2 days`,
       },
     ];
+    const chapter2 = [
+      {
+        name: 'Survey Iron Ridge',
+        done: g.s.ridgeScouted,
+        detail: 'Open the Territory panel and send a surveyor.',
+      },
+      { name: 'Claim the ridge', done: g.s.ridgeClaimed, detail: 'The ridge charter costs 60 coin.' },
+      {
+        name: 'Smelt your own iron',
+        done: (g.s.produced.iron ?? 0) >= 10,
+        detail: `Mine ore on the ridge, smelt it at a bloomery · ${n(g.s.produced.iron ?? 0)}/10`,
+      },
+      {
+        name: 'Break the winter raiders',
+        done: g.s.raidSpawned && g.enemyDefeated,
+        detail: g.s.raidSpawned
+          ? 'Twelve raiders. Fight beside a watchtower, or raise two levies.'
+          : 'They come with the first winter at least a season after the claim.',
+      },
+    ];
+    const objectives = g.s.chapter === 2 ? chapter2 : chapter1;
     this.put(
       this.root.querySelector('#mission')!,
-      `<div class="eyebrow">YOUR CHARTER <span>0${objectives.filter((o) => o.done).length} / 04</span></div><button class="charter-toggle" data-action="charter"><h2>A road to the east</h2><span>${this.charterExpanded ? '−' : '+'}</span></button>${(this.charterExpanded ? objectives : objectives.filter((o) => !o.done).slice(0, 1)).map((o, i) => `<div class="objective ${o.done ? 'done' : ''}"><span>${o.done ? '✓' : `0${i + 1}`}</span><div><strong>${o.name}</strong><small>${o.detail}</small></div></div>`).join('')}${!objectives[0].done ? '<button class="charter-action" data-action="guide">Find food buildings →</button>' : ''}${g.day >= 16 && !g.enemyDefeated ? '<div class="danger-note">Hostile movement on the eastern road. Defend your granary.</div>' : ''}${g.runway < 3 ? '<div class="danger-note">Food is running low. Import supplies or free workers for gathering.</div>' : ''}`,
+      `<div class="eyebrow">YOUR CHARTER <span>0${objectives.filter((o) => o.done).length} / 04</span></div><button class="charter-toggle" data-action="charter"><h2>${g.s.chapter === 2 ? 'The Iron Road' : 'A road to the east'}</h2><span>${this.charterExpanded ? '−' : '+'}</span></button>${(this.charterExpanded ? objectives : objectives.filter((o) => !o.done).slice(0, 1)).map((o, i) => `<div class="objective ${o.done ? 'done' : ''}"><span>${o.done ? '✓' : `0${i + 1}`}</span><div><strong>${o.name}</strong><small>${o.detail}</small></div></div>`).join('')}${!objectives[0].done ? '<button class="charter-action" data-action="guide">Find food buildings →</button>' : ''}${g.day >= 16 && !g.enemyDefeated ? '<div class="danger-note">Hostile movement on the eastern road. Defend your granary.</div>' : ''}${g.runway < 3 ? '<div class="danger-note">Food is running low. Import supplies or free workers for gathering.</div>' : ''}`,
     );
     this.put(
       this.root.querySelector('#clock')!,
@@ -399,19 +484,24 @@ export class UI {
           ([key, ic, label]) =>
             `<button data-action="panel" data-panel="${key}" class="${this.panel === key ? 'active' : ''}">${icon(ic, 22)}<span>${label}</span></button>`,
         )
-        .join(''),
+        .join('') +
+        `<button data-action="road-mode" data-mode="lay" class="${this.roadMode === 'lay' ? 'active' : ''}" title="Lay roads: workers walk them half again as fast">${icon('road', 22)}<span>Roads</span></button>`,
     );
     this.put(
       this.root.querySelector('#place-hint')!,
       this.buildKind
         ? `<span>PLACING ${BUILDINGS[this.buildKind].name.toUpperCase()}</span><strong>${cost(BUILDINGS[this.buildKind].cost)}</strong><small class="${this.view.placementIssue ? 'warning' : ''}">${escape(this.view.placementIssue || 'Site ready · click to build')}</small><div class="placement-actions"><button data-action="rotate-placement">Rotate · R</button><button data-action="cancel-placement">Cancel · Esc</button></div>`
-        : this.formation
-          ? '<span>MILITIA SELECTED</span><small>Right-click ground to march · Esc to deselect</small>'
-          : '',
+        : this.roadMode === 'lift'
+          ? '<span>LIFTING ROADS</span><small>Click a road to lift it and recover half its stone</small><div class="placement-actions"><button data-action="cancel-placement">Done · Esc</button></div>'
+          : this.roadMode === 'lay'
+            ? `<span>LAYING ROAD</span><strong>${this.view.roadCost ? `${this.view.roadCost} stone` : '1 stone / 5 m'}</strong><small class="${this.view.roadIssue ? 'warning' : ''}">${escape(this.roadStart ? this.view.roadIssue || 'Click to lay this stretch · it continues from its end' : 'Click where the road starts')}</small><small>${this.roadStart ? 'Right-click to start somewhere else' : ''}</small><div class="placement-actions"><button data-action="road-mode" data-mode="lift">Lift roads</button><button data-action="cancel-placement">Done · Esc</button></div>`
+            : this.formation
+              ? '<span>MILITIA SELECTED</span><small>Right-click ground to march · Esc to deselect</small>'
+              : '',
     );
     this.root.classList.toggle('inspecting', !!(this.selected || this.formation));
     this.root.classList.toggle('has-panel', !!this.panel);
-    this.root.classList.toggle('building', !!this.buildKind);
+    this.root.classList.toggle('building', !!this.buildKind || !!this.roadMode);
     this.root.classList.toggle('catalogue', this.panel === 'build');
     this.renderInspector();
     this.renderPanel();
@@ -419,6 +509,13 @@ export class UI {
     this.renderToast();
     if (g.s.lost && this.modal !== 'lost') {
       this.modal = 'lost';
+      this.hooks.speed(0);
+      this.renderModal();
+    }
+    if (g.s.won2 && !g.s.objectives.includes('victory2-shown')) {
+      // The later victory supersedes the earlier one if both are pending.
+      g.s.objectives.push('victory2-shown', 'victory-shown');
+      this.modal = 'won2';
       this.hooks.speed(0);
       this.renderModal();
     }
@@ -438,7 +535,7 @@ export class UI {
       if (!b) return;
       const def = BUILDINGS[b.kind],
         crew = g.workers(b.id);
-      const content = `<button class="close" data-action="close" aria-label="Close inspector">${icon('close')}</button><div class="eyebrow">${def.category}</div><h2>${def.name}</h2><p>${def.description}</p><div class="statusline"><span class="status-dot"></span>${b.progress < 1 ? `Construction ${Math.floor(b.progress * 100)}%` : escape(b.status)}</div>${b.progress < 1 ? `<div class="progress"><i style="width:${b.progress * 100}%"></i></div><p class="hint">${g.idle} available builders · ${cost(b.delivered)} reserved.</p><button class="quiet wide" data-action="cancel-build" data-id="${b.id}">Cancel construction & refund</button>` : ''}${def.jobs ? `<div class="section-label">WORKFORCE</div><div class="worker-control"><button data-action="workers" data-id="${b.id}" data-delta="-1" aria-label="Remove worker">−</button><strong>${crew.length}<span> / ${b.slots} assigned slots</span></strong><button data-action="workers" data-id="${b.id}" data-delta="1" aria-label="Add worker">+</button></div><small class="muted">Capacity ${def.jobs}. Empty slots need healthy civilian workers.</small>` : ''}${b.recipe ? `<div class="section-label">PRODUCTION</div>${def.recipes ? `<select id="recipe-select" aria-label="Production recipe">${def.recipes.map((r) => `<option value="${r}" ${r === b.recipe ? 'selected' : ''}>${LABELS[r as Good]}</option>`).join('')}</select>` : ''}<div class="recipe"><span>${cost(RECIPES[b.recipe].input) || 'Local resources'}</span><b>↓</b><strong>${cost(RECIPES[b.recipe].output)}</strong></div>` : ''}${b.recipe && b.kind !== 'field' ? `<div class="target-control"><label for="stock-target">Granary stock target</label><input id="stock-target" type="number" min="0" max="9999" placeholder="Unlimited" value="${b.stockTarget ?? ''}" aria-label="Granary stock target"></div><p class="hint">Stops new batches when stored and incoming ${LABELS[Object.keys(RECIPES[b.recipe].output)[0] as Good].toLowerCase()} reach the target. Restarts when stock falls. Clear for continuous work.</p>` : ''}${b.kind === 'field' ? `<div class="section-label">SEASONAL WORK</div><p>Sown & tended: ${Math.floor(b.crop * 100)}%<br>Unharvested grain: ${n(b.harvest)}</p>` : ''}${b.kind === 'yard' ? '<button class="primary wide" data-action="muster">Muster eight workers</button><p class="hint">Requires 8 spears, 8 shields and 36 provisions. Leaves civilian jobs vacant.</p>' : ''}${b.kind === 'outpost' ? `<p class="hint">Supplied for ${g.s.holdDays}/2 days. Requires two workers, food reserves and a clear crossing.</p>` : ''}<button class="quiet wide" data-action="focus" data-id="${b.id}">Center on building</button>`;
+      const content = `<button class="close" data-action="close" aria-label="Close inspector">${icon('close')}</button><div class="eyebrow">${def.category}</div><h2>${def.name}</h2><p>${def.description}</p><div class="statusline"><span class="status-dot"></span>${b.progress < 1 ? `Construction ${Math.floor(b.progress * 100)}%` : escape(b.status)}</div>${b.progress < 1 ? `<div class="progress"><i style="width:${b.progress * 100}%"></i></div><p class="hint">${g.idle} available builders · ${cost(b.delivered)} reserved.</p><button class="quiet wide" data-action="cancel-build" data-id="${b.id}">Cancel construction & refund</button>` : ''}${def.jobs ? `<div class="section-label">WORKFORCE</div><div class="worker-control"><button data-action="workers" data-id="${b.id}" data-delta="-1" aria-label="Remove worker">−</button><strong>${crew.length}<span> / ${b.slots} assigned slots</span></strong><button data-action="workers" data-id="${b.id}" data-delta="1" aria-label="Add worker">+</button></div><small class="muted">Capacity ${def.jobs}. Empty slots need healthy civilian workers.</small>` : ''}${b.recipe ? `<div class="section-label">PRODUCTION</div>${def.recipes ? `<select id="recipe-select" aria-label="Production recipe">${def.recipes.map((r) => `<option value="${r}" ${r === b.recipe ? 'selected' : ''}>${LABELS[r as Good]}</option>`).join('')}</select>` : ''}<div class="recipe"><span>${cost(RECIPES[b.recipe].input) || 'Local resources'}</span><b>↓</b><strong>${cost(RECIPES[b.recipe].output)}</strong></div>` : ''}${b.recipe && b.kind !== 'field' ? `<div class="target-control"><label for="stock-target">Granary stock target</label><input id="stock-target" type="number" min="0" max="9999" placeholder="Unlimited" value="${b.stockTarget ?? ''}" aria-label="Granary stock target"></div><p class="hint">Stops new batches when stored and incoming ${LABELS[Object.keys(RECIPES[b.recipe].output)[0] as Good].toLowerCase()} reach the target. Restarts when stock falls. Clear for continuous work.</p>` : ''}${b.kind === 'field' ? `<div class="section-label">SEASONAL WORK</div><p>Sown & tended: ${Math.floor(b.crop * 100)}%<br>Unharvested grain: ${n(b.harvest)}</p>` : ''}${b.kind === 'yard' ? '<button class="primary wide" data-action="muster">Muster eight workers</button><p class="hint">Requires 8 spears, 8 shields and 36 provisions. Leaves civilian jobs vacant.</p>' : ''}${b.kind === 'outpost' ? `<p class="hint">Supplied for ${g.s.holdDays}/2 days. Requires two workers, food reserves and a clear crossing.</p>` : ''}${b.progress >= 1 && b.kind !== 'depot' ? `<button class="quiet wide ${this.demolishArmed === b.id ? 'danger' : ''}" data-action="demolish" data-id="${b.id}">${this.demolishArmed === b.id ? `Confirm · salvage ${cost(Object.fromEntries(Object.entries(def.cost).map(([k, v]) => [k, Math.floor((v ?? 0) / 2)])) as Stock) || 'nothing'}` : 'Demolish…'}</button>` : ''}<button class="quiet wide" data-action="focus" data-id="${b.id}">Center on building</button>`;
       if (!['recipe-select', 'stock-target'].includes(document.activeElement?.id ?? ''))
         this.put(el, content);
     } else if (this.formation) {
@@ -489,7 +586,7 @@ export class UI {
       this.put(
         el,
         head('The economy', 'Every stockpile has a purpose. Keep a reserve before you trade.') +
-          `<div class="economy-summary"><strong>${n(g.food)}<small>EDIBLE PORTIONS</small></strong><strong>${g.runway.toFixed(1)}<small>DAYS IN RESERVE</small></strong><strong>${g.demand.toFixed(0)}<small>FOOD / DAY, ALL PEOPLE</small></strong></div><table><thead><tr><th>Resource</th><th>Granary</th><th>Carried</th><th>Reserved</th></tr></thead><tbody>${GOODS.map((r) => `<tr><td>${LABELS[r]}</td><td>${n(g.stock(r))}</td><td>${n(g.carried(r))}</td><td>${n(g.reserved(r))}</td></tr>`).join('')}</tbody></table><p class="hint">Carried includes workshop inputs and goods on their way home. Reserved stock belongs to unfinished construction.</p><section class="winter-reserve"><div class="eyebrow">${g.season === 3 ? 'WINTER IS HERE' : `WINTER IN ${g.winterReserve.startsIn} DAYS`}</div><h3>Keep the hearths burning</h3><div class="metric"><span>Household heat · ${g.winterReserve.days} days</span><strong class="${g.winterReserve.fuelGap ? 'warning' : ''}">${n(g.stock('firewood'))} / ${n(g.winterReserve.fuel)} firewood</strong></div><div class="metric"><span>Civilian food · ${g.winterReserve.days} days</span><strong class="${g.winterReserve.foodGap ? 'warning' : ''}">${n(g.food)} / ${n(g.winterReserve.food)} portions</strong></div>${g.soldiers ? `<div class="metric"><span>Deployed militia needs</span><strong>${n(g.winterReserve.military)} provisions</strong></div>` : ''}<p class="hint">Reserve target for current homes and population. Future production, spoilage, workshop fuel and outpost meals are additional; this is a planning baseline, not a survival guarantee. Root gathering and field work stop in winter.</p></section><h3>Caravan trade</h3><p class="hint">One day to arrive. Two contracts at a time. Imports cost 120% of base price; exports pay 70%.</p><div class="trade-controls"><select id="trade-good" aria-label="Trade resource">${GOODS.map((r) => `<option value="${r}" ${tradeGood === r ? 'selected' : ''}>${LABELS[r]} · ${PRICES[r]} base coin</option>`).join('')}</select><input type="number" min="1" max="40" value="${tradeQty}" id="trade-qty" aria-label="Trade quantity"><button class="primary" data-action="trade" data-buy="true">Import</button><button class="quiet" data-action="trade" data-buy="false">Export</button></div>${g.s.trades.map((t) => `<div class="metric"><span>${t.buy ? 'Importing' : 'Exporting'} ${t.qty} ${LABELS[t.good]}</span><strong>${Math.ceil(90 - t.time)}s</strong></div>`).join('')}`,
+          `<div class="economy-summary"><strong>${n(g.food)}<small>EDIBLE PORTIONS</small></strong><strong>${g.runway.toFixed(1)}<small>DAYS IN RESERVE</small></strong><strong>${g.demand.toFixed(0)}<small>FOOD / DAY, ALL PEOPLE</small></strong></div><table><thead><tr><th>Resource</th><th>Granary</th><th>Carried</th><th>Reserved</th></tr></thead><tbody>${GOODS.map((r) => `<tr><td>${LABELS[r]}</td><td>${n(g.stock(r))}</td><td>${n(g.carried(r))}</td><td>${n(g.reserved(r))}</td></tr>`).join('')}</tbody></table><p class="hint">Carried includes workshop inputs and goods on their way home. Reserved stock belongs to unfinished construction.</p><section class="winter-reserve"><div class="eyebrow">${g.season === 3 ? 'WINTER IS HERE' : `WINTER IN ${g.winterReserve.startsIn} DAYS`}</div><h3>Keep the hearths burning</h3><div class="metric"><span>Household heat · ${g.winterReserve.days} days</span><strong class="${g.winterReserve.fuelGap ? 'warning' : ''}">${n(g.stock('firewood'))} / ${n(g.winterReserve.fuel)} firewood</strong></div><div class="metric"><span>Civilian food · ${g.winterReserve.days} days</span><strong class="${g.winterReserve.foodGap ? 'warning' : ''}">${n(g.food)} / ${n(g.winterReserve.food)} portions</strong></div>${g.soldiers ? `<div class="metric"><span>Deployed militia needs</span><strong>${n(g.winterReserve.military)} provisions</strong></div>` : ''}<p class="hint">Reserve target for current homes and population. Future production, spoilage, workshop fuel and outpost meals are additional; this is a planning baseline, not a survival guarantee. Root gathering and field work stop in winter.</p></section><h3>Caravan trade</h3><p class="hint">One day to arrive. Two contracts at a time. Traders carry limited stock: buying drains it and raises the price, selling floods it and lowers what you get. Stock drifts back each day.</p><div class="trade-controls"><select id="trade-good" aria-label="Trade resource">${GOODS.map((r) => `<option value="${r}" ${tradeGood === r ? 'selected' : ''}>${LABELS[r]} · buy ${g.price(r, true).toFixed(1)} · sell ${g.price(r, false).toFixed(1)} · ${n(g.s.market[r] ?? 0)} on offer</option>`).join('')}</select><input type="number" min="1" max="40" value="${tradeQty}" id="trade-qty" aria-label="Trade quantity"><button class="primary" data-action="trade" data-buy="true">Import</button><button class="quiet" data-action="trade" data-buy="false">Export</button></div>${g.s.trades.map((t) => `<div class="metric"><span>${t.buy ? 'Importing' : 'Exporting'} ${t.qty} ${LABELS[t.good]}</span><strong>${Math.ceil(90 - t.time)}s</strong></div>`).join('')}`,
       );
     }
     if (this.panel === 'people') {
@@ -516,7 +613,7 @@ export class UI {
       this.put(
         el,
         head('Beyond the river', 'Secure a road home before you claim new land.') +
-          `<div class="territory-card"><small>01 · YOUR CHARTER</small><h3>Alder Valley</h3><p>Woodland, farmland and a riverside market. The granary is the heart of your settlement.</p></div><div class="territory-card contested"><small>02 · ${g.s.claimed ? 'YOUR NEW HOLDING' : g.enemyDefeated ? 'AVAILABLE TO CLAIM' : 'CONTESTED'}</small><h3>The Crossing</h3><p>${g.s.scouted ? (g.enemyDefeated ? 'The occupiers have withdrawn. A charter and a supplied outpost will secure the road.' : `${g.s.enemy.count} occupiers guard the eastern bank. Their morale is ${n(g.s.enemy.morale)}%.`) : 'Your scout can reveal who holds the eastern bank.'}</p>${!g.s.scouted ? `<button class="primary" data-action="scout" ${g.s.scouting ? 'disabled' : ''}>${g.s.scouting ? 'Scout on the road…' : 'Scout the crossing · 10 coin'}</button>` : !g.s.claimed ? '<button class="primary" data-action="claim">Claim the crossing · 40 coin</button>' : `<p><b>${g.s.holdDays}/2 days supplied</b><br>Build an outpost east of the river and assign two workers.</p>`}</div><div class="territory-card"><small>03 · BEYOND THIS CHARTER</small><h3>Iron Ridge</h3><p>The next chapter of the lordship. The ridge is a landmark in this playable slice; its mining industry is not yet implemented.</p></div><button class="quiet wide" data-action="overlay">${this.view.overlay ? 'Hide' : 'Show'} borders in the world</button>`,
+          `<div class="territory-card"><small>01 · YOUR CHARTER</small><h3>Alder Valley</h3><p>Woodland, farmland and a riverside market. The granary is the heart of your settlement.</p></div><div class="territory-card contested"><small>02 · ${g.s.claimed ? 'YOUR NEW HOLDING' : g.enemyDefeated ? 'AVAILABLE TO CLAIM' : 'CONTESTED'}</small><h3>The Crossing</h3><p>${g.s.scouted ? (g.enemyDefeated ? 'The occupiers have withdrawn. A charter and a supplied outpost will secure the road.' : `${g.s.enemy.count} occupiers guard the eastern bank. Their morale is ${n(g.s.enemy.morale)}%.`) : 'Your scout can reveal who holds the eastern bank.'}</p>${!g.s.scouted ? `<button class="primary" data-action="scout" ${g.s.scouting ? 'disabled' : ''}>${g.s.scouting ? 'Scout on the road…' : 'Scout the crossing · 10 coin'}</button>` : !g.s.claimed ? '<button class="primary" data-action="claim">Claim the crossing · 40 coin</button>' : `<p><b>${g.s.holdDays}/2 days supplied</b><br>Build an outpost east of the river and assign two workers.</p>`}</div><div class="territory-card ${g.s.ridgeClaimed ? '' : 'contested'}"><small>03 · ${g.s.ridgeClaimed ? 'YOUR MINING HOLDING' : g.s.won ? 'CHAPTER II' : 'BEYOND THIS CHARTER'}</small><h3>Iron Ridge</h3><p>${!g.s.won ? 'Secure the crossing first. The ridge beyond holds iron, and iron draws trouble.' : !g.s.ridgeScouted ? 'Survey the ridge for ore. Your own iron would end the caravan dependence for spears and tools.' : !g.s.ridgeClaimed ? 'Rich ore seams. Claiming the ridge opens it for mining; raiders will come the following winter.' : `Mine ore here, smelt it at a bloomery. ${n(g.s.produced.iron ?? 0)}/10 iron smelted. ${g.s.raidSpawned ? (g.enemyDefeated ? 'The raiders are broken.' : 'Raiders are at hand.') : 'Raiders will come with the first winter after the claim.'}`}</p>${g.s.won && !g.s.ridgeScouted ? `<button class="primary" data-action="scout-ridge" ${g.s.ridgeScouting ? 'disabled' : ''}>${g.s.ridgeScouting ? 'Surveyor on the road…' : 'Survey Iron Ridge · 15 coin'}</button>` : g.s.ridgeScouted && !g.s.ridgeClaimed ? '<button class="primary" data-action="claim-ridge">Claim Iron Ridge · 60 coin</button>' : ''}</div><button class="quiet wide" data-action="overlay">${this.view.overlay ? 'Hide' : 'Show'} borders in the world</button>`,
       );
     }
     if (this.panel === 'journal') {
@@ -549,7 +646,7 @@ export class UI {
     const close = `<button class="close" data-action="close" aria-label="Close dialog">${icon('close')}</button>`;
     let content = '';
     if (this.modal === 'welcome') {
-      content = `<div class="welcome-art"></div><div class="welcome-body"><div class="eyebrow">COZY VILLAGE · BORDERLAND</div><h1>The Alder<br>Crossing</h1><p>Build a village worth defending.</p><p class="muted">A river separates your new settlement from the eastern road. Raise a harvest, prepare for winter, and decide how many working hands you can spare for the militia.</p><div class="welcome-facts"><span>16 workers</span><span>One contested crossing</span><span>Your first charter</span></div><button class="primary large" data-action="start">Begin your charter ${icon('chevron', 18)}</button><button class="quiet" data-action="load">Continue saved settlement</button><small class="hint">WASD pan · Q/E rotate · Scroll zoom · Space pause<br>Playable development slice · 0.3.0</small></div>`;
+      content = `<div class="welcome-art"></div><div class="welcome-body"><div class="eyebrow">COZY VILLAGE · BORDERLAND</div><h1>The Alder<br>Crossing</h1><p>Build a village worth defending.</p><p class="muted">A river separates your new settlement from the eastern road. Raise a harvest, prepare for winter, and decide how many working hands you can spare for the militia.</p><div class="welcome-facts"><span>16 workers</span><span>One contested crossing</span><span>Your first charter</span></div><button class="primary large" data-action="start">Begin your charter ${icon('chevron', 18)}</button><button class="quiet" data-action="load">Continue saved settlement</button><small class="hint">WASD pan · Q/E rotate · Scroll zoom · Space pause<br>Playable development slice · 0.4.0</small></div>`;
     }
     if (this.modal === 'menu') {
       content =
@@ -583,7 +680,12 @@ export class UI {
     if (this.modal === 'won') {
       content =
         close +
-        `<div class="eyebrow">CHARTER SECURED</div><h1>The crossing<br>holds.</h1><p>Your settlement has become a lordship. The eastern outpost is staffed and supplied; the road belongs to Alder.</p><button class="primary wide" data-action="close">Continue building</button><button class="quiet wide" data-action="save">Save this settlement</button>`;
+        `<div class="eyebrow">CHARTER SECURED</div><h1>The crossing<br>holds.</h1><p>Your settlement has become a lordship. The eastern outpost is staffed and supplied; the road belongs to Alder.</p><p><b>Chapter II begins:</b> beyond the crossing lies Iron Ridge. Survey it from the Territory panel.</p><button class="primary wide" data-action="close">Continue to the Iron Road</button><button class="quiet wide" data-action="save">Save this settlement</button>`;
+    }
+    if (this.modal === 'won2') {
+      content =
+        close +
+        `<div class="eyebrow">CHAPTER II COMPLETE</div><h1>The Iron Road<br>is yours.</h1><p>Alder mines and smelts its own iron, and the winter raiders are broken. The lordship stands on its own feet.</p><button class="primary wide" data-action="close">Keep building</button><button class="quiet wide" data-action="save">Save this settlement</button>`;
     }
     if (this.modal === 'lost') {
       content = `<div class="eyebrow">CHARTER LOST</div><h1>A season<br>to remember.</h1><p>${escape(this.game.s.events.at(-1)?.text ?? 'The settlement could not sustain its charter.')}</p><button class="primary wide" data-action="load">Return to a manual save</button><button class="quiet wide" data-action="new">Begin a new charter</button>`;
