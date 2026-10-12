@@ -1,0 +1,26 @@
+{
+  "name": "cozy-village-borderland",
+  "version": "0.3.0",
+  "private": true,
+  "type": "module",
+  "description": "A playable settlement and frontier strategy slice",
+  "main": "desktop/main.cjs",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1 --port 5190",
+    "build": "tsc --noEmit && vite build",
+    "test": "node --import tsx tests/simulation.ts && node --import tsx tests/playthrough.ts",
+    "desktop": "electron .",
+    "package:mac": "node desktop/package.mjs"
+  },
+  "dependencies": {
+    "three": "0.169.0"
+  },
+  "devDependencies": {
+    "@types/node": "26.2.0",
+    "@types/three": "0.169.0",
+    "electron": "44.5.1",
+    "tsx": "4.19.2",
+    "typescript": "5.6.3",
+    "vite": "5.4.10"
+  }
+}
