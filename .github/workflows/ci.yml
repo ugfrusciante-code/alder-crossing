@@ -16,5 +16,8 @@ jobs:
         with: { node-version: 22, cache: npm }
       # npm ci skips platform-optional binaries from a macOS lockfile (npm/cli#4828).
       - run: npm install --no-audit --no-fund
+      # The macOS-made lockfile still loses rollup's Linux binary on the
+      # runner; install the exact matching version so the build can run.
+      - run: npm install --no-save --no-audit --no-fund "@rollup/rollup-linux-x64-gnu@$(node -p "require('rollup/package.json').version")"
       - run: npm run build
       - run: npm test
