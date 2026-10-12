@@ -11,6 +11,7 @@ export const GOODS = [
   'provisions',
   'tools',
   'iron',
+  'ore',
   'spears',
   'shields',
 ] as const;
@@ -29,6 +30,7 @@ export const LABELS: Record<Good, string> = {
   provisions: 'Provisions',
   tools: 'Tools',
   iron: 'Iron',
+  ore: 'Iron ore',
   spears: 'Spears',
   shields: 'Shields',
 };
@@ -45,6 +47,7 @@ export const PRICES: Record<Good, number> = {
   provisions: 5,
   tools: 12,
   iron: 8,
+  ore: 3,
   spears: 15,
   shields: 9,
 };
@@ -63,7 +66,9 @@ export type Kind =
   | 'smith'
   | 'yard'
   | 'tower'
-  | 'outpost';
+  | 'outpost'
+  | 'mine'
+  | 'smelter';
 export type RecipeId =
   | 'logs'
   | 'fish'
@@ -76,7 +81,9 @@ export type RecipeId =
   | 'spears'
   | 'shields'
   | 'tools'
-  | 'provisions';
+  | 'provisions'
+  | 'ore'
+  | 'iron';
 export interface Recipe {
   input: Stock;
   output: Stock;
@@ -96,6 +103,8 @@ export const RECIPES: Record<RecipeId, Recipe> = {
   shields: { input: { planks: 1 }, output: { shields: 1 }, work: 18 },
   tools: { input: { iron: 1, logs: 0.5 }, output: { tools: 1 }, work: 24 },
   provisions: { input: { roots: 2, firewood: 0.2 }, output: { provisions: 1.8 }, work: 8 },
+  ore: { input: {}, output: { ore: 2 }, work: 26 },
+  iron: { input: { ore: 2, firewood: 1 }, output: { iron: 1 }, work: 20 },
 };
 export interface Definition {
   name: string;
@@ -213,8 +222,7 @@ export const BUILDINGS: Record<Kind, Definition> = {
   smith: {
     name: 'Village smithy',
     category: 'Industry',
-    description:
-      'Forge spears or tools from imported iron, or make wooden shields. Choose a recipe in the inspector.',
+    description: 'Forge spears or tools from iron, or make wooden shields. Choose a recipe in the inspector.',
     cost: { logs: 8, planks: 4, stone: 6 },
     work: 45,
     size: [6, 5],
@@ -250,6 +258,28 @@ export const BUILDINGS: Record<Kind, Definition> = {
     work: 40,
     size: [6, 5],
     jobs: 2,
+  },
+  mine: {
+    name: 'Iron Ridge mine',
+    category: 'Industry',
+    description:
+      'Digs iron ore out of Iron Ridge. Only possible on the ridge, east of the crossing, once the ridge charter is yours.',
+    cost: { logs: 10, planks: 4, tools: 2 },
+    work: 45,
+    size: [6, 5],
+    jobs: 3,
+    recipe: 'ore',
+  },
+  smelter: {
+    name: 'Bloomery',
+    category: 'Industry',
+    description:
+      'Burns ore with firewood into iron. Your own iron ends the dependence on caravans for spears and tools.',
+    cost: { logs: 6, stone: 8 },
+    work: 35,
+    size: [5, 5],
+    jobs: 2,
+    recipe: 'iron',
   },
 };
 export const SEASONS = ['Spring', 'Summer', 'Autumn', 'Winter'];

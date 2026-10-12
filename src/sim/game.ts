@@ -110,6 +110,26 @@ export interface State {
   history: { day: number; food: number; coin: number; population: number }[];
   objectives: string[];
   rng: number;
+  /** Player-laid road segments. Workers walk them half again as fast. */
+  roads: Road[];
+  /** Materials recovered from demolished buildings and lifted roads. */
+  salvaged: Stock;
+  /** What the travelling traders can sell you right now, good by good. */
+  market: Stock;
+  /** 1 = the crossing; 2 = the Iron Road, which opens once the crossing holds. */
+  chapter: number;
+  ridgeScouting: number;
+  ridgeScouted: boolean;
+  ridgeClaimed: boolean;
+  ridgeClaimedDay: number;
+  raidSpawned: boolean;
+  /** The raiders camp beyond the ridge until this day, giving the village time to arm. */
+  raidMarchDay: number;
+  won2: boolean;
+}
+export interface Road {
+  a: Point;
+  b: Point;
 }
 export type Command =
   | { type: 'build'; kind: Kind; x: number; z: number; rotation?: number }
@@ -123,7 +143,12 @@ export type Command =
   | { type: 'trade'; good: Good; qty: number; buy: boolean }
   | { type: 'scout' }
   | { type: 'claim' }
-  | { type: 'immigrate' };
+  | { type: 'immigrate' }
+  | { type: 'road'; a: Point; b: Point }
+  | { type: 'clearRoad'; x: number; z: number }
+  | { type: 'demolish'; id: number }
+  | { type: 'scoutRidge' }
+  | { type: 'claimRidge' };
 export interface Result {
   ok: boolean;
   message: string;
@@ -138,14 +163,45 @@ const add = (s: Stock, goods: Stock, factor = 1) => {
     s[g as Good] = Math.max(0, (s[g as Good] ?? 0) + (n ?? 0) * factor);
 };
 const ok = (message: string, id?: number): Result => ({ ok: true, message, id });
+/** The traders' usual stock. Buying drains it, selling floods it, and it drifts back daily. */
+export const MARKET_BASE: Record<Good, number> = {
+  logs: 80,
+  planks: 40,
+  stone: 60,
+  firewood: 80,
+  grain: 60,
+  flour: 30,
+  bread: 40,
+  roots: 60,
+  fish: 30,
+  provisions: 40,
+  tools: 10,
+  iron: 24,
+  ore: 20,
+  // At least one full muster's worth, so a village can buy its way to a militia.
+  spears: 12,
+  shields: 12,
+};
+/** Stone per five metres of road. */
+export const ROAD_STONE_PER = 5;
+const roadCost = (r: Road) => Math.max(1, Math.ceil(dist(r.a, r.b) / ROAD_STONE_PER));
+const cellOf = (v: number) => Math.max(1, Math.min(98, Math.round((v + 100) / 2)));
+function segmentDistance(p: Point, r: Road) {
+  const dx = r.b.x - r.a.x,
+    dz = r.b.z - r.a.z,
+    len2 = dx * dx + dz * dz || 1;
+  const t = Math.max(0, Math.min(1, ((p.x - r.a.x) * dx + (p.z - r.a.z) * dz) / len2));
+  return dist(p, { x: r.a.x + dx * t, z: r.a.z + dz * t });
+}
 const no = (message: string): Result => ({ ok: false, message });
 
 export class Game {
   s: State;
   private routeCache = new Map<string, Point[]>();
+  private roadSet: Set<number> | null = null;
   constructor(saved?: State) {
     if (saved) {
-      this.s = saved;
+      this.s = Game.normalize(saved);
       return;
     }
     const initial: Stock = {
@@ -161,6 +217,7 @@ export class Game {
       provisions: 0,
       tools: 8,
       iron: 12,
+      ore: 0,
       spears: 0,
       shields: 0,
     };
@@ -199,6 +256,17 @@ export class Game {
       history: [],
       objectives: [],
       rng: 1701,
+      roads: [],
+      salvaged: blank(),
+      market: { ...MARKET_BASE },
+      chapter: 1,
+      ridgeScouting: 0,
+      ridgeScouted: false,
+      ridgeClaimed: false,
+      ridgeClaimedDay: 0,
+      raidSpawned: false,
+      raidMarchDay: 0,
+      won2: false,
     };
     this.place('depot', -17, 5, true);
     const homes = [
@@ -219,6 +287,77 @@ export class Game {
       'good',
     );
     this.assign();
+  }
+  /**
+   * Bring a save from an earlier build up to the current shape. Every field
+   * added since version 2 is optional on disk and defaults here, so old
+   * settlements keep loading.
+   */
+  static normalize(s: State): State {
+    for (const key of ['stock', 'produced', 'consumed', 'losses', 'imports', 'exports', 'initial'] as const)
+      if (s[key]) for (const g of GOODS) s[key][g] ??= 0;
+    s.roads ??= [];
+    s.salvaged = { ...blank(), ...(s.salvaged ?? {}) };
+    s.market = { ...MARKET_BASE, ...(s.market ?? {}) };
+    s.chapter ??= s.won ? 2 : 1;
+    s.ridgeScouting ??= 0;
+    s.ridgeScouted ??= false;
+    s.ridgeClaimed ??= false;
+    s.ridgeClaimedDay ??= 0;
+    s.raidSpawned ??= false;
+    s.raidMarchDay ??= 0;
+    s.won2 ??= false;
+    return s;
+  }
+  /** Grid cells (the pathfinder's two-metre grid) that carry a road. */
+  private get roads() {
+    if (!this.roadSet) {
+      this.roadSet = new Set();
+      for (const r of this.s.roads) {
+        const steps = Math.max(1, Math.ceil(dist(r.a, r.b) / 0.5));
+        for (let i = 0; i <= steps; i++) {
+          const x = r.a.x + ((r.b.x - r.a.x) * i) / steps,
+            z = r.a.z + ((r.b.z - r.a.z) * i) / steps;
+          this.roadSet.add(cellOf(z) * 100 + cellOf(x));
+        }
+      }
+    }
+    return this.roadSet;
+  }
+  onRoad(p: Point) {
+    return this.s.roads.length > 0 && this.roads.has(cellOf(p.z) * 100 + cellOf(p.x));
+  }
+  private roadsChanged() {
+    this.roadSet = null;
+    this.routeCache.clear();
+  }
+  /** Price per unit right now. Scarce goods cost more; a flooded market pays less. */
+  price(g: Good, buy: boolean) {
+    const scarcity = Math.sqrt(MARKET_BASE[g] / Math.max(1, this.s.market[g] ?? 0));
+    return PRICES[g] * Math.max(0.6, Math.min(2, scarcity)) * (buy ? 1.2 : 0.7);
+  }
+  validateRoad(a: Point, b: Point) {
+    if (![a.x, a.z, b.x, b.z].every(Number.isFinite)) return 'Invalid road.';
+    const len = dist(a, b);
+    if (len < 2) return 'Drag the road at least two metres.';
+    if (len > 40) return 'Lay roads in stretches of 40 metres or less.';
+    if (this.s.roads.length >= 200) return 'The village cannot maintain more roads.';
+    const steps = Math.ceil(len / 0.5);
+    for (let i = 0; i <= steps; i++) {
+      const x = a.x + ((b.x - a.x) * i) / steps,
+        z = a.z + ((b.z - a.z) * i) / steps;
+      if (Math.abs(x) > 80 || Math.abs(z) > 75) return 'Stay inside the surveyed valley.';
+      if (!walkable(x, z)) return 'Roads cannot cross the river. Use the bridge.';
+      if (region(x) === 1 && !this.s.claimed) return 'This land is not under your charter.';
+      if (region(x) === 2 && !this.s.ridgeClaimed) return 'Iron Ridge is not under your charter.';
+      for (const bd of this.s.buildings) {
+        if (bd.kind === 'field') continue;
+        const [w, d] = this.footprint(bd.kind, bd.rotation);
+        if (Math.abs(x - bd.x) < w / 2 && Math.abs(z - bd.z) < d / 2)
+          return `The ${BUILDINGS[bd.kind].name.toLowerCase()} is in the way.`;
+      }
+    }
+    return '';
   }
   get time() {
     return this.s.tick * TICK;
@@ -369,7 +508,10 @@ export class Game {
     if (kind === 'outpost') {
       if (!this.s.claimed) return 'Scout, defeat the occupiers, and purchase the crossing charter first.';
       if (region(x) !== 1) return 'The outpost belongs on the eastern crossing.';
-    } else if (region(x) > 0 && !this.s.claimed) return 'This land is not under your charter.';
+    } else if (region(x) === 1 && !this.s.claimed) return 'This land is not under your charter.';
+    else if (region(x) === 2 && !this.s.ridgeClaimed)
+      return this.s.won ? 'Survey and claim Iron Ridge first.' : 'Iron Ridge is beyond this charter.';
+    if (kind === 'mine' && region(x) !== 2) return 'A mine has to sit on Iron Ridge, east of the crossing.';
     if (water(x, z) || Math.abs(x - riverX(z)) < w / 2 + 6) return 'Keep the footprint on dry land.';
     if (kind === 'fishery' && Math.abs(x - riverX(z)) > 19)
       return 'A fishing hut needs to be close to the river.';
@@ -452,6 +594,52 @@ export class Game {
         b.recipe = c.recipe;
         return ok('Recipe updated. Existing batches finish first.');
       }
+      case 'demolish':
+        return this.demolish(c.id);
+      case 'road': {
+        const why = this.validateRoad(c.a, c.b);
+        if (why) return no(why);
+        const road = { a: { x: c.a.x, z: c.a.z }, b: { x: c.b.x, z: c.b.z } };
+        const stone = roadCost(road);
+        if (this.stock('stone') < stone) return no(`This stretch needs ${stone} stone.`);
+        add(this.s.stock, { stone }, -1);
+        add(this.s.consumed, { stone });
+        this.s.roads.push(road);
+        this.roadsChanged();
+        return ok(`Road laid for ${stone} stone. Workers walk it half again as fast.`);
+      }
+      case 'clearRoad': {
+        const p = { x: c.x, z: c.z };
+        const gone = this.s.roads.filter((r) => segmentDistance(p, r) < 2);
+        if (!gone.length) return no('No road here.');
+        this.s.roads = this.s.roads.filter((r) => !gone.includes(r));
+        const stone = gone.reduce((n, r) => n + Math.floor(roadCost(r) / 2), 0);
+        add(this.s.stock, { stone });
+        add(this.s.salvaged, { stone });
+        this.roadsChanged();
+        return ok(`Road lifted. ${stone} stone recovered.`);
+      }
+      case 'scoutRidge':
+        if (!this.s.won) return no('Secure the crossing before looking further east.');
+        if (this.s.ridgeScouted || this.s.ridgeScouting > 0)
+          return no('The ridge is already surveyed or being surveyed.');
+        if (this.s.coin < 15) return no('The surveyor needs 15 coin.');
+        this.s.coin -= 15;
+        this.s.ridgeScouting = 1;
+        this.log('A surveyor sets out for Iron Ridge. Return expected in one minute.');
+        return ok('Surveyor dispatched.');
+      case 'claimRidge':
+        if (!this.s.ridgeScouted) return no('Survey Iron Ridge first.');
+        if (this.s.ridgeClaimed) return no('The ridge charter is already yours.');
+        if (this.s.coin < 60) return no('The ridge charter costs 60 coin.');
+        this.s.coin -= 60;
+        this.s.ridgeClaimed = true;
+        this.s.ridgeClaimedDay = this.day;
+        this.log(
+          'Iron Ridge is yours. Mine its ore, smelt your own iron, and be ready: wealth on the ridge will draw raiders in winter.',
+          'good',
+        );
+        return ok('Iron Ridge is open for mining.');
       case 'muster':
         return this.muster();
       case 'move': {
@@ -475,10 +663,18 @@ export class Game {
           return no('Trade between 1 and 40 units at a time.');
         if (this.s.trades.length >= 2) return no('Both caravan slots are in use.');
         const qty = Math.floor(c.qty);
-        const price = PRICES[c.good] * qty * (c.buy ? 1.2 : 0.7);
+        const price = Math.round(this.price(c.good, c.buy) * qty * 100) / 100;
         if (c.buy) {
+          const available = Math.floor(this.s.market[c.good] ?? 0);
+          if (available < qty)
+            return no(
+              available
+                ? `The traders only have ${available} ${c.good} this week.`
+                : `The traders have no ${c.good} left.`,
+            );
           if (this.s.coin < price) return no('Not enough coin.');
           this.s.coin -= price;
+          this.s.market[c.good] = (this.s.market[c.good] ?? 0) - qty;
         } else {
           if (this.stock(c.good) < qty) return no('Not enough uncommitted stock.');
           this.s.stock[c.good] = this.stock(c.good) - qty;
@@ -522,6 +718,45 @@ export class Game {
         this.log('Eight new workers join Alder. Their food and housing needs are now yours.', 'good');
         return ok('The newcomers have settled in.');
     }
+  }
+  private demolish(id: number): Result {
+    const b = this.building(id);
+    if (!b) return no('Building not found.');
+    if (b.progress < 1) return no('Cancel unfinished construction instead; it refunds everything.');
+    if (b.kind === 'depot') return no('The granary is the heart of the village and cannot be torn down.');
+    if (b.kind === 'yard' && this.s.formations.length)
+      return no('The militia is still in the field. Demobilize it first.');
+    if (b.kind === 'cottage' && this.housing - 4 < this.population)
+      return no('Everyone would not fit in the remaining homes. Build another cottage first.');
+    // Half the materials come back; the rest was spent on the labour of raising it.
+    const refund: Stock = {};
+    for (const [g, q] of Object.entries(BUILDINGS[b.kind].cost)) refund[g as Good] = Math.floor((q ?? 0) / 2);
+    add(this.s.stock, refund);
+    add(this.s.salvaged, refund);
+    this.s.buildings = this.s.buildings.filter((a) => a.id !== b.id);
+    this.routeCache.clear();
+    const homes = this.s.buildings.filter((h) => h.kind === 'cottage' && h.progress >= 1);
+    let next = 0;
+    for (const p of this.s.people) {
+      if (p.home === b.id && homes.length) p.home = homes[next++ % homes.length].id;
+      if (p.job !== b.id) continue;
+      // Workers mid-trip keep what they carry and take it to the granary.
+      p.job = null;
+      p.work = 0;
+      p.tripRecipe = undefined;
+      if (sum(p.cargo) > 0.001) this.travel(p, this.entrance(this.depot), 'toDepot');
+      else {
+        p.task = 'idle';
+        p.path = [];
+      }
+    }
+    this.assign();
+    const back = Object.entries(refund)
+      .filter(([, q]) => q)
+      .map(([g, q]) => `${q} ${g}`)
+      .join(', ');
+    this.log(`${BUILDINGS[b.kind].name} demolished.${back ? ` Salvaged ${back}.` : ''}`);
+    return ok(`Demolished.${back ? ` Salvaged ${back}.` : ''}`);
   }
   private muster() {
     const yard = this.s.buildings.find((b) => b.kind === 'yard' && b.progress >= 1);
@@ -604,6 +839,10 @@ export class Game {
       tx = cell(to.x),
       tz = cell(to.z);
     const key = `${sx},${sz},${tx},${tz}`;
+    // Road cells cost half a step. The heuristic is scaled to match so it stays
+    // admissible, but only when roads exist, so road-free routes are unchanged.
+    const roads = this.s.roads.length ? this.roads : null;
+    const hw = roads ? 0.5 : 1;
     const cached = this.routeCache.get(key);
     if (cached) return cached.map((p) => ({ ...p }));
     const start = sz * 100 + sx,
@@ -624,7 +863,7 @@ export class Game {
         best = 1e9;
       for (let i = 0; i < open.length; i++) {
         const id = open[i],
-          v = g.get(id)! + Math.abs((id % 100) - tx) + Math.abs(Math.floor(id / 100) - tz);
+          v = g.get(id)! + hw * (Math.abs((id % 100) - tx) + Math.abs(Math.floor(id / 100) - tz));
         if (v < best) {
           bi = i;
           best = v;
@@ -649,7 +888,7 @@ export class Game {
           id = nz * 100 + nx;
         if (nx < 1 || nz < 1 || nx > 98 || nz > 98 || closed.has(id)) continue;
         if (id !== end && blocked(nx * 2 - 100, nz * 2 - 100)) continue;
-        const cost = g.get(current)! + 1;
+        const cost = g.get(current)! + (roads?.has(id) ? 0.5 : 1);
         if (cost < (g.get(id) ?? 1e9)) {
           g.set(id, cost);
           parent.set(id, current);
@@ -672,7 +911,7 @@ export class Game {
   }
   private move(p: Person, speed = 2.4) {
     if (!p.path.length) return true;
-    let budget = speed * TICK;
+    let budget = speed * (this.onRoad(p) ? 1.5 : 1) * TICK;
     while (p.path.length && budget > 0) {
       const q = p.path[0],
         d = dist(p, q);
@@ -700,6 +939,17 @@ export class Game {
     p.tripRecipe = undefined;
     p.task = 'idle';
     p.work = 0;
+  }
+  /**
+   * A worker whose post is out of season lends a hand on a building site
+   * instead of standing idle at it. They keep their job and return to it once
+   * the site is finished or the season turns.
+   */
+  private helpBuild(p: Person) {
+    const site = this.s.buildings.find((b) => b.progress < 1);
+    if (!site) return false;
+    p.target = site.id;
+    return this.travel(p, this.entrance(site), 'build');
   }
   private worker(p: Person) {
     if (!p.alive || p.formation) return;
@@ -815,6 +1065,7 @@ export class Game {
     if (b.kind === 'field') {
       if (this.season === 3 || (this.season === 2 && b.harvest <= 0)) {
         b.status = 'Field resting';
+        this.helpBuild(p);
         return;
       }
       p.tripRecipe = 'grain';
@@ -825,6 +1076,7 @@ export class Game {
     if (!r) return;
     if (r.seasonal && this.season === 3) {
       b.status = 'Ground frozen';
+      this.helpBuild(p);
       return;
     }
     if (
@@ -869,6 +1121,17 @@ export class Game {
         );
       }
     }
+    if (this.s.ridgeScouting > 0) {
+      this.s.ridgeScouting += TICK;
+      if (this.s.ridgeScouting >= 60) {
+        this.s.ridgeScouting = 0;
+        this.s.ridgeScouted = true;
+        this.log(
+          'The surveyor found rich ore seams on Iron Ridge. A charter for the ridge costs 60 coin.',
+          'good',
+        );
+      }
+    }
     for (const t of this.s.trades) t.time = Math.round((t.time + TICK) * 20) / 20;
     for (const t of this.s.trades.filter((t) => t.time >= DAY_SECONDS)) {
       if (t.buy) {
@@ -877,6 +1140,7 @@ export class Game {
       } else {
         this.s.coin += t.price;
         add(this.s.exports, { [t.good]: t.qty });
+        this.s.market[t.good] = (this.s.market[t.good] ?? 0) + t.qty;
       }
       this.log(`Caravan arrived: ${t.buy ? 'delivered' : 'sold'} ${t.qty} ${t.good}.`, 'good');
     }
@@ -988,6 +1252,54 @@ export class Game {
         'good',
       );
     }
+    // Traders restock (or sell off) a tenth of the way back to their usual levels.
+    for (const g of GOODS) {
+      const m = this.s.market[g] ?? 0;
+      this.s.market[g] = Math.round((m + (MARKET_BASE[g] - m) * 0.1) * 100) / 100;
+    }
+    if (this.s.won && this.s.chapter === 1) {
+      this.s.chapter = 2;
+      this.log(
+        'Chapter II: the Iron Road. Survey Iron Ridge beyond the crossing. Your own iron would free Alder from the caravans.',
+        'good',
+      );
+    }
+    if (
+      this.s.chapter === 2 &&
+      this.s.ridgeClaimed &&
+      !this.s.raidSpawned &&
+      // The first winter to *begin* after the claim: a full season to mine,
+      // smelt and arm before the ridge's wealth draws anyone in.
+      this.season === 3 &&
+      this.day % 24 === 18 &&
+      this.day - this.s.ridgeClaimedDay >= SEASON_DAYS
+    ) {
+      this.s.raidSpawned = true;
+      this.s.raidMarchDay = this.day + 2;
+      this.s.enemy = {
+        x: 95,
+        z: 12,
+        count: 12,
+        morale: 90,
+        damage: 0,
+        target: { x: 95, z: 12 },
+        routed: false,
+      };
+      this.log(
+        'Twelve raiders have made camp beyond Iron Ridge, drawn by its iron. In two days they march on the granary. Eight spears alone may not hold them: fight beside a watchtower, or raise a second levy.',
+        'bad',
+      );
+    }
+    if (
+      this.s.chapter === 2 &&
+      !this.s.won2 &&
+      this.s.raidSpawned &&
+      this.enemyDefeated &&
+      (this.s.produced.iron ?? 0) >= 10
+    ) {
+      this.s.won2 = true;
+      this.log('The raiders are broken and Alder forges its own iron. The Iron Road is yours.', 'good');
+    }
     this.s.history.push({ day: this.day, food: this.food, coin: this.s.coin, population: this.population });
     if (this.s.history.length > 100) this.s.history.shift();
   }
@@ -997,7 +1309,8 @@ export class Game {
       const threat = this.s.formations.find((f) => dist(f, e) < 24 && f.state !== 'gathering');
       if (threat) {
         e.target = { x: threat.x, z: threat.z };
-      } else if (this.day >= 18) e.target = this.entrance(this.depot);
+      } else if (this.day >= 18 && this.day >= this.s.raidMarchDay) e.target = this.entrance(this.depot);
+      else e.target = { x: e.x, z: e.z };
       const route = this.path(e, e.target);
       if (route.length && dist(e, e.target) > 4) {
         const p = route.find((p) => dist(p, e) > 0.4) ?? e.target;
@@ -1152,6 +1465,7 @@ export class Game {
   static load(raw: string) {
     if (raw.length > 5_000_000) throw new Error('Save is too large.');
     const s = JSON.parse(raw) as State;
+    if (s && typeof s === 'object' && s.version === 2 && s.stock) Game.normalize(s);
     if (
       s.version !== 2 ||
       !Array.isArray(s.people) ||
@@ -1174,6 +1488,12 @@ export class Game {
       throw new Error('Save values are invalid.');
     for (const g of GOODS)
       if (!finite(s.stock[g]) || s.stock[g]! < 0) throw new Error('Invalid stock in save.');
+    if (
+      !Array.isArray(s.roads) ||
+      s.roads.length > 200 ||
+      s.roads.some((r) => ![r?.a?.x, r?.a?.z, r?.b?.x, r?.b?.z].every(finite))
+    )
+      throw new Error('Invalid roads in save.');
     const ids = new Set<number>();
     for (const b of s.buildings) {
       if (
@@ -1218,7 +1538,8 @@ export class Game {
       const expected =
         (this.s.initial[g] ?? 0) +
         (this.s.produced[g] ?? 0) +
-        (this.s.imports[g] ?? 0) -
+        (this.s.imports[g] ?? 0) +
+        (this.s.salvaged[g] ?? 0) -
         (this.s.consumed[g] ?? 0) -
         (this.s.exports[g] ?? 0) -
         (this.s.losses[g] ?? 0);
