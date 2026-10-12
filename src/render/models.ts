@@ -15,7 +15,7 @@ function texture(type:'wood'|'plaster'|'roof'|'stone',seed=7){
 }
 export function materials(){
  const atlas=new T.TextureLoader().load('./textures/material-atlas.png');atlas.colorSpace=T.SRGBColorSpace;atlas.anisotropy=16;
- const tile=(x:number,y:number)=>{const t=atlas.clone();t.offset.set(x*.5+.001,y*.5+.001);t.repeat.set(.498,.498);t.needsUpdate=true;return t};
+ const tile=(x:number,y:number)=>{const t=atlas.clone();t.offset.set(x*.5+.001,y*.5+.001);t.repeat.set(.498,.498);return t} // clones share the atlas's image source; the loader flags it for upload on arrival, so flagging here only warns every frame until the PNG lands;
  const roof=tile(0,1),plaster=tile(1,1),wood=tile(0,0),stone=tile(1,0);
  const mat=(color:number,map?:T.Texture)=>new T.MeshStandardMaterial({color,roughness:.95,map,bumpMap:map,bumpScale:.035});
  return {timber:mat(0xb5a990,wood),plaster:mat(0xeee8d7,plaster),thatch:mat(0xe1d9ae,roof),strawLight:mat(0xe7d8a7,roof),strawDark:mat(0xc3b589,roof),stone:mat(0xd6d3c6,stone),rust:mat(0x9b8b74,roof),wood:mat(0xe0ceb0,wood),iron:mat(palette.iron),red:mat(palette.red),cloth:mat(palette.cloth),dark:mat(palette.dark),soil:mat(0x716044),green:mat(0x7e8851)};
